@@ -3,6 +3,7 @@ import { OrderStatus, Prisma } from '@prisma/client';
 import { AppError } from '../errors/AppError';
 import { OrderRepository, OrderWithDetails } from '../repositories/order.repository';
 import { CreateCheckoutInput } from '../schemas/order.schema';
+import { withOptimisticRetry } from '../utils/optimisticRetry';
 
 export interface CheckoutResult {
   order: OrderWithDetails;
@@ -125,12 +126,14 @@ export class OrderService {
       }
     }
 
-    // 4. Execução Atômica (prisma.$transaction) com tratamento de concorrência
+    // 4. Execução Atômica (prisma.$transaction) com retry otimista (máx. 3 tentativas)
     try {
-      const order = await this.orderRepository.executeCheckoutTransaction(
-        idempotencyKey,
-        requestHash,
-        input
+      const order = await withOptimisticRetry(() =>
+        this.orderRepository.executeCheckoutTransaction(
+          idempotencyKey,
+          requestHash,
+          input
+        )
       );
 
       return {
@@ -202,10 +205,11 @@ export class OrderService {
       );
     }
 
-    // 2. Execução Atômica do Estorno (DEBIT no Ledger + decremento nas Wallets + Order REFUNDED)
+    // 2. Execução Atômica do Estorno com retry otimista (máx. 3 tentativas)
     try {
-      const refundedOrder =
-        await this.orderRepository.executeRefundTransaction(orderId);
+      const refundedOrder = await withOptimisticRetry(() =>
+        this.orderRepository.executeRefundTransaction(orderId)
+      );
 
       return {
         order: refundedOrder,

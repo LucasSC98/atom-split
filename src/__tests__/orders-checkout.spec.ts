@@ -21,12 +21,14 @@ jest.mock('../config/database', () => ({
     wallet: {
       findUnique: jest.fn(),
       update: jest.fn(),
+      updateMany: jest.fn(),
     },
     order: {
       findUnique: jest.fn(),
       findUniqueOrThrow: jest.fn(),
       findMany: jest.fn(),
       create: jest.fn(),
+      updateMany: jest.fn(),
     },
     paymentSplit: {
       create: jest.fn(),
@@ -230,17 +232,9 @@ describe('Etapa 3: Orders & Split Checkout Module', () => {
         .mockResolvedValueOnce({ id: 'split-1' })
         .mockResolvedValueOnce({ id: 'split-2' });
 
-      (mockedPrisma.wallet.update as jest.Mock)
-        .mockResolvedValueOnce({
-          id: 'wallet-platform',
-          balanceCents: 1500,
-          version: 2,
-        })
-        .mockResolvedValueOnce({
-          id: 'wallet-seller-a',
-          balanceCents: 8500,
-          version: 2,
-        });
+      (mockedPrisma.wallet.updateMany as jest.Mock)
+        .mockResolvedValueOnce({ count: 1 })
+        .mockResolvedValueOnce({ count: 1 });
 
       (mockedPrisma.ledgerEntry.create as jest.Mock).mockResolvedValue({});
 
@@ -280,7 +274,7 @@ describe('Etapa 3: Orders & Split Checkout Module', () => {
       expect(response.status).toBe(201);
       expect(response.headers['x-idempotent-replayed']).toBe('false');
       expect(response.body.idempotentReplayed).toBe(false);
-      expect(mockedPrisma.wallet.update).toHaveBeenCalledWith({
+      expect(mockedPrisma.wallet.updateMany).toHaveBeenCalledWith({
         where: { id: 'wallet-platform', version: 1 },
         data: { balanceCents: { increment: 1500 }, version: { increment: 1 } },
       });

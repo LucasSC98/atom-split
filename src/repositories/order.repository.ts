@@ -5,7 +5,11 @@ import {
   Prisma,
 } from '@prisma/client';
 import { prisma } from '../config/database';
-import { AppError } from '../errors/AppError';
+import {
+  AppError,
+  OptimisticLockError,
+  OrderStatusConflictError,
+} from '../errors';
 import { CreateCheckoutInput } from '../schemas/order.schema';
 
 export const orderDetailsSelect = {
@@ -135,7 +139,7 @@ export class OrderRepository {
     requestHash: string,
     input: CreateCheckoutInput
   ): Promise<OrderWithDetails> {
-    return prisma.$transaction(async (tx) => {
+    const createdOrderId = await prisma.$transaction(async (tx) => {
       // a) Cria a Order com status PAID, idempotencyKey e requestHash
       const createdOrder = await tx.order.create({
         data: {
@@ -151,7 +155,6 @@ export class OrderRepository {
 
       // b) Processa cada item do split de forma atômica
       for (const splitItem of input.splits) {
-        // Busca o estado atual da Wallet do recebedor dentro da transação
         const currentWallet = await tx.wallet.findUnique({
           where: { userId: splitItem.recipientId },
         });
@@ -164,7 +167,6 @@ export class OrderRepository {
           );
         }
 
-        // Cria o registro em PaymentSplit
         const paymentSplit = await tx.paymentSplit.create({
           data: {
             orderId: createdOrder.id,
@@ -176,8 +178,8 @@ export class OrderRepository {
           },
         });
 
-        // Atualiza a Wallet com controle de concorrência otimista (verificando `version` lida)
-        const updatedWallet = await tx.wallet.update({
+        // Atualiza a Wallet com updateMany verificando a version lida (Optimistic Locking)
+        const walletUpdate = await tx.wallet.updateMany({
           where: {
             id: currentWallet.id,
             version: currentWallet.version,
@@ -188,7 +190,16 @@ export class OrderRepository {
           },
         });
 
-        // Cria o registro imutável em LedgerEntry com o snapshot exato do saldo (balanceAfterCents)
+        if (walletUpdate.count === 0) {
+          throw new OptimisticLockError(
+            `Conflito de concorrência ao atualizar saldo da carteira ${currentWallet.id} (Optimistic Locking). Tente novamente.`
+          );
+        }
+
+        const newBalanceCents =
+          currentWallet.balanceCents + splitItem.amountCents;
+        const newVersion = currentWallet.version + 1;
+
         await tx.ledgerEntry.create({
           data: {
             walletId: currentWallet.id,
@@ -197,7 +208,7 @@ export class OrderRepository {
             type: LedgerEntryType.CREDIT,
             referenceType: LedgerReferenceType.ORDER_SPLIT,
             amountCents: splitItem.amountCents,
-            balanceAfterCents: updatedWallet.balanceCents,
+            balanceAfterCents: newBalanceCents,
             idempotencyKey: `${input.customerId}:${idempotencyKey}:split:${splitItem.recipientId}:${splitItem.splitType}`,
             description:
               input.description ??
@@ -206,25 +217,24 @@ export class OrderRepository {
               splitType: splitItem.splitType,
               feeBps: splitItem.feeBps ?? null,
               previousBalanceCents: currentWallet.balanceCents,
-              newBalanceCents: updatedWallet.balanceCents,
-              walletVersion: updatedWallet.version,
+              newBalanceCents,
+              walletVersion: newVersion,
             },
           },
         });
       }
 
-      // Retorna a Order completa com splits e lançamentos do Ledger
-      const fullOrder = await tx.order.findUniqueOrThrow({
-        where: { id: createdOrder.id },
-        select: orderDetailsSelect,
-      });
+      return createdOrder.id;
+    });
 
-      return fullOrder;
+    return prisma.order.findUniqueOrThrow({
+      where: { id: createdOrderId },
+      select: orderDetailsSelect,
     });
   }
 
   async executeRefundTransaction(orderId: string): Promise<OrderWithDetails> {
-    return prisma.$transaction(async (tx) => {
+    await prisma.$transaction(async (tx) => {
       const order = await tx.order.findUnique({
         where: { id: orderId },
         include: {
@@ -238,11 +248,34 @@ export class OrderRepository {
         throw new AppError('Pedido não encontrado.', 404, 'ORDER_NOT_FOUND');
       }
 
+      if (order.status === OrderStatus.REFUNDED) {
+        throw new OrderStatusConflictError(
+          `O pedido ${order.id} já se encontra com status REFUNDED.`
+        );
+      }
+
       if (order.status !== OrderStatus.PAID) {
         throw new AppError(
           `Apenas pedidos com status PAID podem ser estornados (status atual: ${order.status}).`,
           422,
           'INVALID_ORDER_STATUS_FOR_REFUND'
+        );
+      }
+
+      // Garante a transição de status PAID -> REFUNDED via updateMany condicional
+      const orderUpdate = await tx.order.updateMany({
+        where: {
+          id: order.id,
+          status: OrderStatus.PAID,
+        },
+        data: {
+          status: OrderStatus.REFUNDED,
+        },
+      });
+
+      if (orderUpdate.count === 0) {
+        throw new OrderStatusConflictError(
+          'Conflito de concorrência ao atualizar o status do pedido durante o estorno.'
         );
       }
 
@@ -268,30 +301,26 @@ export class OrderRepository {
           );
         }
 
-        // Atualiza a Wallet decrementando amountCents e incrementando version (Optimistic Locking)
-        let updatedWallet;
-        try {
-          updatedWallet = await tx.wallet.update({
-            where: {
-              id: currentWallet.id,
-              version: currentWallet.version,
-            },
-            data: {
-              balanceCents: { decrement: split.amountCents },
-              version: { increment: 1 },
-            },
-          });
-        } catch (err) {
-          if (
-            err instanceof Prisma.PrismaClientKnownRequestError &&
-            err.code === 'P2025'
-          ) {
-            err.meta = { ...err.meta, p2025Target: 'wallet' };
-          }
-          throw err;
+        const walletUpdate = await tx.wallet.updateMany({
+          where: {
+            id: currentWallet.id,
+            version: currentWallet.version,
+          },
+          data: {
+            balanceCents: { decrement: split.amountCents },
+            version: { increment: 1 },
+          },
+        });
+
+        if (walletUpdate.count === 0) {
+          throw new OptimisticLockError(
+            `Conflito de concorrência ao processar estorno na carteira ${currentWallet.id} (Optimistic Locking). Tente novamente.`
+          );
         }
 
-        // Cria novo registro imutável DEBIT no LedgerEntry sem tocar nos registros anteriores
+        const newBalanceCents = currentWallet.balanceCents - split.amountCents;
+        const newVersion = currentWallet.version + 1;
+
         await tx.ledgerEntry.create({
           data: {
             walletId: currentWallet.id,
@@ -300,46 +329,23 @@ export class OrderRepository {
             type: LedgerEntryType.DEBIT,
             referenceType: LedgerReferenceType.ORDER_REFUND,
             amountCents: split.amountCents,
-            balanceAfterCents: updatedWallet.balanceCents,
+            balanceAfterCents: newBalanceCents,
             idempotencyKey: `${order.idempotencyKey}:refund:${split.id}`,
             description: `Estorno referente ao pedido ${order.id}`,
             metadata: {
               splitType: split.splitType,
               previousBalanceCents: currentWallet.balanceCents,
-              newBalanceCents: updatedWallet.balanceCents,
-              walletVersion: updatedWallet.version,
+              newBalanceCents,
+              walletVersion: newVersion,
             },
           },
         });
       }
+    });
 
-      // Atualiza o status da Order para REFUNDED garantindo que ainda estava PAID
-      try {
-        await tx.order.update({
-          where: {
-            id: order.id,
-            status: OrderStatus.PAID,
-          },
-          data: {
-            status: OrderStatus.REFUNDED,
-          },
-        });
-      } catch (err) {
-        if (
-          err instanceof Prisma.PrismaClientKnownRequestError &&
-          err.code === 'P2025'
-        ) {
-          err.meta = { ...err.meta, p2025Target: 'order' };
-        }
-        throw err;
-      }
-
-      const refundedOrder = await tx.order.findUniqueOrThrow({
-        where: { id: order.id },
-        select: orderDetailsSelect,
-      });
-
-      return refundedOrder;
+    return prisma.order.findUniqueOrThrow({
+      where: { id: orderId },
+      select: orderDetailsSelect,
     });
   }
 }

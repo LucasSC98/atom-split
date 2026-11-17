@@ -1,6 +1,10 @@
 import crypto from 'crypto';
 import { OrderStatus, Prisma, SplitType, UserRole } from '@prisma/client';
-import { AppError } from '../errors/AppError';
+import {
+  AppError,
+  OptimisticLockError,
+  OrderStatusConflictError,
+} from '../errors';
 import { OrderRepository, OrderWithDetails } from '../repositories/order.repository';
 import { CreateCheckoutInput } from '../schemas/order.schema';
 import { withOptimisticRetry } from '../utils/optimisticRetry';
@@ -74,7 +78,6 @@ export class OrderService {
     }
 
     // 2. Validação Matemática de Centavos (Zero-Sum):
-    // A soma exata dos splits DEVE ser estritamente igual ao totalAmountCents
     const splitsSumCents = input.splits.reduce(
       (sum, item) => sum + item.amountCents,
       0
@@ -178,7 +181,7 @@ export class OrderService {
       }
     }
 
-    // 4. Execução Atômica (prisma.$transaction) com retry otimista (máx. 3 tentativas)
+    // 4. Execução Atômica (prisma.$transaction) com retry otimista (máx. 8 tentativas)
     try {
       const order = await withOptimisticRetry(() =>
         this.orderRepository.executeCheckoutTransaction(
@@ -218,18 +221,6 @@ export class OrderService {
         }
       }
 
-      // Se a trava de concorrência otimista (version da Wallet) falhar:
-      if (
-        error instanceof Prisma.PrismaClientKnownRequestError &&
-        error.code === 'P2025'
-      ) {
-        throw new AppError(
-          'Conflito de concorrência ao atualizar saldo da carteira (Optimistic Locking). Tente novamente.',
-          409,
-          'WALLET_CONCURRENCY_CONFLICT'
-        );
-      }
-
       throw error;
     }
   }
@@ -257,7 +248,7 @@ export class OrderService {
       );
     }
 
-    // 2. Execução Atômica do Estorno com retry otimista (máx. 3 tentativas)
+    // 2. Execução Atômica do Estorno com retry otimista (máx. 8 tentativas em OptimisticLockError)
     try {
       const refundedOrder = await withOptimisticRetry(() =>
         this.orderRepository.executeRefundTransaction(orderId)
@@ -268,14 +259,13 @@ export class OrderService {
         idempotentReplayed: false,
       };
     } catch (error) {
-      // Ao capturar P2002, P2025 ou erro de estado/saldo causado por um refund concorrente que
-      // acabou de comitar, relê o pedido: se já estiver REFUNDED, retorna replay idempotente (200).
+      // Trata OrderStatusConflictError, P2002 (e OptimisticLockError caso outro refund tenha vencido)
+      // relendo o pedido: se REFUNDED -> replay 200
       if (
+        error instanceof OrderStatusConflictError ||
+        error instanceof OptimisticLockError ||
         (error instanceof Prisma.PrismaClientKnownRequestError &&
-          (error.code === 'P2002' || error.code === 'P2025')) ||
-        (error instanceof AppError &&
-          (error.code === 'INVALID_ORDER_STATUS_FOR_REFUND' ||
-            error.code === 'INSUFFICIENT_WALLET_BALANCE_FOR_REFUND'))
+          error.code === 'P2002')
       ) {
         const currentOrder = await this.orderRepository.findById(orderId);
         if (currentOrder && currentOrder.status === OrderStatus.REFUNDED) {
@@ -283,29 +273,6 @@ export class OrderService {
             order: currentOrder,
             idempotentReplayed: true,
           };
-        }
-
-        if (
-          error instanceof Prisma.PrismaClientKnownRequestError &&
-          error.code === 'P2025'
-        ) {
-          const target = error.meta?.p2025Target ?? error.meta?.modelName;
-          if (target === 'order' || target === 'Order') {
-            throw new AppError(
-              'Conflito de concorrência ao atualizar o status do pedido durante o estorno.',
-              409,
-              'ORDER_STATUS_CONCURRENCY_CONFLICT'
-            );
-          }
-
-          // Só lança 409 WALLET_CONCURRENCY_CONFLICT se o pedido continuar PAID
-          if (!currentOrder || currentOrder.status === OrderStatus.PAID) {
-            throw new AppError(
-              'Conflito de concorrência ao processar estorno na carteira (Optimistic Locking). Tente novamente.',
-              409,
-              'WALLET_CONCURRENCY_CONFLICT'
-            );
-          }
         }
       }
 

@@ -1,0 +1,170 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================================
+// ENUMS
+// ============================================================================
+
+enum UserRole {
+  PLATFORM // Conta da plataforma (Marketplace) que recebe taxas/comissões
+  SELLER   // Lojista / Vendedor recebedor no split
+  CUSTOMER // Comprador final
+}
+
+enum OrderStatus {
+  PENDING    // Criada, aguardando processamento do pagamento/split
+  PAID       // Pagamento confirmado e split liquidado no Ledger
+  REFUNDED   // Estornada (gera lançamentos inversos DEBIT no Ledger)
+  FAILED     // Falha no processamento
+}
+
+enum SplitType {
+  PLATFORM_FEE // Taxa retida pelo Marketplace
+  SELLER_SHARE // Repasse líquido destinado ao Vendedor
+}
+
+enum LedgerEntryType {
+  CREDIT // Entrada de recursos na carteira (+ centavos)
+  DEBIT  // Saída de recursos da carteira (- centavos)
+}
+
+enum LedgerReferenceType {
+  ORDER_SPLIT    // Crédito oriundo de split de pagamento de pedido
+  ORDER_REFUND   // Débito oriundo de estorno de pedido
+  WITHDRAWAL     // Saque / Payout para conta bancária externa
+  TRANSFER       // Transferência entre carteiras
+}
+
+// ============================================================================
+// MODELS
+// ============================================================================
+
+/// Representa participantes do ecossistema: Plataforma (Marketplace), Sellers e Clientes
+model User {
+  id        String   @id @default(uuid()) @db.Uuid
+  name      String
+  email     String   @unique
+  document  String   @unique // CPF ou CNPJ (apenas dígitos)
+  role      UserRole @default(SELLER)
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  // Relacionamentos
+  wallet          Wallet?
+  customerOrders  Order[]        @relation("CustomerOrders")
+  receivedSplits  PaymentSplit[] @relation("RecipientSplits")
+
+  @@index([role])
+  @@map("users")
+}
+
+/// Carteira digital vinculada 1:1 a um recebedor (Seller ou Plataforma).
+/// REGRA DE OURO: `balanceCents` NUNCA deve sofrer UPDATE isolado; toda alteração
+/// ocorre obrigatoriamente dentro de uma $transaction acompanhada de um LedgerEntry.
+model Wallet {
+  id           String   @id @default(uuid()) @db.Uuid
+  userId       String   @unique @map("user_id") @db.Uuid
+  /// Saldo atual em CENTAVOS (ex: R$ 100,00 = 10000). Nunca usar Float/Decimal.
+  balanceCents Int      @default(0) @map("balance_cents")
+  currency     String   @default("BRL") @db.VarChar(3)
+  /// Controle de concorrência otimista (incrementado a cada movimentação)
+  version      Int      @default(1)
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  // Relacionamentos
+  user          User           @relation(fields: [userId], references: [id], onDelete: Restrict)
+  ledgerEntries LedgerEntry[]
+  paymentSplits PaymentSplit[]
+
+  @@map("wallets")
+}
+
+/// Transação / Pedido original realizado pelo cliente.
+/// Contém a `idempotencyKey` obrigatória para evitar cobranças ou splits duplicados.
+model Order {
+  id               String      @id @default(uuid()) @db.Uuid
+  customerId       String      @map("customer_id") @db.Uuid
+  /// Chave única de idempotência enviada no header `Idempotency-Key`
+  idempotencyKey   String      @unique @map("idempotency_key")
+  /// Valor total da venda em CENTAVOS (soma exata de todos os PaymentSplits)
+  totalAmountCents Int         @map("total_amount_cents")
+  currency         String      @default("BRL") @db.VarChar(3)
+  status           OrderStatus @default(PENDING)
+  description      String?
+  createdAt        DateTime    @default(now()) @map("created_at")
+  updatedAt        DateTime    @updatedAt @map("updated_at")
+
+  // Relacionamentos
+  customer      User           @relation("CustomerOrders", fields: [customerId], references: [id], onDelete: Restrict)
+  paymentSplits PaymentSplit[]
+  ledgerEntries LedgerEntry[]
+
+  @@index([customerId])
+  @@index([status])
+  @@map("orders")
+}
+
+/// Regra e registro de divisão (Split) de uma Order.
+/// A soma de `amountCents` de todos os splits de uma Order DEVE ser exatamente igual a `Order.totalAmountCents`.
+model PaymentSplit {
+  id          String    @id @default(uuid()) @db.Uuid
+  orderId     String    @map("order_id") @db.Uuid
+  recipientId String    @map("recipient_id") @db.Uuid
+  walletId    String    @map("wallet_id") @db.Uuid
+  splitType   SplitType @map("split_type")
+  /// Valor alocado a este recebedor em CENTAVOS (inteiro positivo)
+  amountCents Int       @map("amount_cents")
+  /// Percentual em basis points (opcional, para auditoria: ex: 1500 = 15.00%)
+  feeBps      Int?      @map("fee_bps")
+  createdAt   DateTime  @default(now()) @map("created_at")
+
+  // Relacionamentos
+  order         Order         @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  recipient     User          @relation("RecipientSplits", fields: [recipientId], references: [id], onDelete: Restrict)
+  wallet        Wallet        @relation(fields: [walletId], references: [id], onDelete: Restrict)
+  ledgerEntries LedgerEntry[]
+
+  @@index([orderId])
+  @@index([recipientId])
+  @@index([walletId])
+  @@map("payment_splits")
+}
+
+/// Livro-Razão (Ledger) estritamente imutável (Append-Only).
+/// Nenhum registro aqui deve ser atualizado (UPDATE) ou removido (DELETE).
+/// Cada entrada registra o impacto em centavos e o snapshot do saldo resultante (`balanceAfterCents`).
+model LedgerEntry {
+  id                String              @id @default(uuid()) @db.Uuid
+  walletId          String              @map("wallet_id") @db.Uuid
+  orderId           String?             @map("order_id") @db.Uuid
+  paymentSplitId    String?             @map("payment_split_id") @db.Uuid
+  type              LedgerEntryType
+  referenceType     LedgerReferenceType @map("reference_type")
+  /// Valor movimentado em CENTAVOS (sempre inteiro positivo > 0; o sinal depende de `type`)
+  amountCents       Int                 @map("amount_cents")
+  /// Snapshot do saldo da Wallet imediatamente após este lançamento (em CENTAVOS)
+  balanceAfterCents Int                 @map("balance_after_cents")
+  /// Chave de idempotência da operação contábil para impedir lançamentos duplicados
+  idempotencyKey    String              @unique @map("idempotency_key")
+  description       String?
+  metadata          Json?
+  createdAt         DateTime            @default(now()) @map("created_at")
+
+  // Relacionamentos
+  wallet       Wallet        @relation(fields: [walletId], references: [id], onDelete: Restrict)
+  order        Order?        @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  paymentSplit PaymentSplit? @relation(fields: [paymentSplitId], references: [id], onDelete: Restrict)
+
+  @@index([walletId, createdAt])
+  @@index([orderId])
+  @@index([paymentSplitId])
+  @@map("ledger_entries")
+}
+

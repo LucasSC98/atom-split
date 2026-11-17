@@ -58,7 +58,7 @@ export async function withOptimisticRetry<T>(
         maxDelayMs,
         baseDelayMs * Math.pow(2, attempt - 1)
       );
-      const jitter = Math.floor(Math.random() * 120);
+      const jitter = Math.floor(Math.random() * maxDelayMs);
       const totalDelayMs = exponentialDelay + jitter;
 
       await sleep(totalDelayMs);

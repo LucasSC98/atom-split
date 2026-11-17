@@ -33,7 +33,7 @@ export const orderDetailsSelect = {
     },
   },
   paymentSplits: {
-    orderBy: { createdAt: 'asc' as const },
+    orderBy: [{ createdAt: 'asc' as const }, { id: 'asc' as const }],
     select: {
       id: true,
       orderId: true,
@@ -167,18 +167,7 @@ export class OrderRepository {
           );
         }
 
-        const paymentSplit = await tx.paymentSplit.create({
-          data: {
-            orderId: createdOrder.id,
-            recipientId: splitItem.recipientId,
-            walletId: currentWallet.id,
-            splitType: splitItem.splitType,
-            amountCents: splitItem.amountCents,
-            feeBps: splitItem.feeBps,
-          },
-        });
-
-        // Atualiza a Wallet com updateMany verificando a version lida (Optimistic Locking)
+        // Atualiza a Wallet imediatamente após a leitura verificando a version lida (Optimistic Locking)
         const walletUpdate = await tx.wallet.updateMany({
           where: {
             id: currentWallet.id,
@@ -199,6 +188,17 @@ export class OrderRepository {
         const newBalanceCents =
           currentWallet.balanceCents + splitItem.amountCents;
         const newVersion = currentWallet.version + 1;
+
+        const paymentSplit = await tx.paymentSplit.create({
+          data: {
+            orderId: createdOrder.id,
+            recipientId: splitItem.recipientId,
+            walletId: currentWallet.id,
+            splitType: splitItem.splitType,
+            amountCents: splitItem.amountCents,
+            feeBps: splitItem.feeBps,
+          },
+        });
 
         await tx.ledgerEntry.create({
           data: {
@@ -239,7 +239,7 @@ export class OrderRepository {
         where: { id: orderId },
         include: {
           paymentSplits: {
-            orderBy: { createdAt: 'asc' },
+            orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
           },
         },
       });

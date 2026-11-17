@@ -145,6 +145,8 @@ model PaymentSplit {
 /// Cada entrada registra o impacto em centavos e o snapshot do saldo resultante (`balanceAfterCents`).
 model LedgerEntry {
   id                String              @id @default(uuid()) @db.Uuid
+  /// Sequencial monotônico de inserção para ordenação determinística do razão contábil
+  seq               BigInt              @default(autoincrement())
   walletId          String              @map("wallet_id") @db.Uuid
   orderId           String?             @map("order_id") @db.Uuid
   paymentSplitId    String?             @map("payment_split_id") @db.Uuid
@@ -165,6 +167,7 @@ model LedgerEntry {
   order        Order?        @relation(fields: [orderId], references: [id], onDelete: Restrict)
   paymentSplit PaymentSplit? @relation(fields: [paymentSplitId], references: [id], onDelete: Restrict)
 
+  @@index([walletId, seq])
   @@index([walletId, createdAt])
   @@index([orderId])
   @@index([paymentSplitId])

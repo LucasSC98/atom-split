@@ -28,11 +28,12 @@ export class WalletRepository {
       }),
       prisma.ledgerEntry.findMany({
         where: { walletId },
-        orderBy: { createdAt: 'desc' },
+        orderBy: { seq: 'desc' },
         skip,
         take: limit,
         select: {
           id: true,
+          seq: true,
           walletId: true,
           orderId: true,
           paymentSplitId: true,

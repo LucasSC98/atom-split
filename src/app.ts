@@ -4,6 +4,11 @@ import helmet from 'helmet';
 import { routes } from './routes';
 import { errorHandler } from './middlewares/errorHandler';
 
+// Garante serialização JSON segura para campos BigInt (ex: LedgerEntry.seq)
+(BigInt.prototype as unknown as { toJSON: () => number }).toJSON = function () {
+  return Number(this);
+};
+
 const app = express();
 
 app.use(helmet());

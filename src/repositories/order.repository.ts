@@ -49,9 +49,10 @@ export const orderDetailsSelect = {
     },
   },
   ledgerEntries: {
-    orderBy: { createdAt: 'asc' as const },
+    orderBy: { seq: 'asc' as const },
     select: {
       id: true,
+      seq: true,
       walletId: true,
       orderId: true,
       paymentSplitId: true,

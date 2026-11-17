@@ -2,6 +2,7 @@ import request from 'supertest';
 import { OrderStatus, UserRole } from '@prisma/client';
 import { app } from '../app';
 import { prisma } from '../config/database';
+import { truncateTestDatabaseTables } from './setup';
 
 describe('Tarefa 8: Suíte E2E de Concorrência, Idempotência Estrita, Trigger Imutável e Invariantes', () => {
   let platformId: string;
@@ -13,9 +14,7 @@ describe('Tarefa 8: Suíte E2E de Concorrência, Idempotência Estrita, Trigger 
   let customerId: string;
 
   beforeAll(async () => {
-    await prisma.$executeRawUnsafe(
-      'TRUNCATE TABLE "ledger_entries", "payment_splits", "orders", "wallets", "users" RESTART IDENTITY CASCADE;'
-    );
+    await truncateTestDatabaseTables(prisma);
 
     const platformRes = await request(app).post('/api/users').send({
       name: 'AtomicSplit Marketplace',

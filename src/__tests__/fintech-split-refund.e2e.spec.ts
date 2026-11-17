@@ -7,6 +7,7 @@ import {
 } from '@prisma/client';
 import { app } from '../app';
 import { prisma } from '../config/database';
+import { truncateTestDatabaseTables } from './setup';
 
 describe('Etapa 4: Suíte E2E de Split de Pagamentos, Idempotência, Zero-Sum e Estorno (Refund)', () => {
   let platformId: string;
@@ -19,10 +20,7 @@ describe('Etapa 4: Suíte E2E de Split de Pagamentos, Idempotência, Zero-Sum e 
   let createdOrderId: string;
 
   beforeAll(async () => {
-    // Limpa tabelas via TRUNCATE (pois DELETE em ledger_entries é bloqueado pelo trigger append-only)
-    await prisma.$executeRawUnsafe(
-      'TRUNCATE TABLE "ledger_entries", "payment_splits", "orders", "wallets", "users" RESTART IDENTITY CASCADE;'
-    );
+    await truncateTestDatabaseTables(prisma);
 
     // Cria Plataforma, 2 Vendedores e 1 Cliente via API POST /api/users
     const platformRes = await request(app).post('/api/users').send({

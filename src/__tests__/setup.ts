@@ -35,6 +35,16 @@ export function assertTestDatabaseGuard(): string {
     );
   }
 
+  const directUrl = process.env.DIRECT_URL;
+  if (directUrl) {
+    const directDbName = new URL(directUrl).pathname.replace(/^\//, '');
+    if (!directDbName.endsWith('_test')) {
+      throw new Error(
+        `[TEST_DB_GUARD] Execução abortada! O banco da DIRECT_URL ("${directDbName}") DEVE terminar obrigatoriamente em "_test".`
+      );
+    }
+  }
+
   return dbName;
 }
 

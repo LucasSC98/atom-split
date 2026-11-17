@@ -19,12 +19,10 @@ describe('Etapa 4: Suíte E2E de Split de Pagamentos, Idempotência, Zero-Sum e 
   let createdOrderId: string;
 
   beforeAll(async () => {
-    // Limpa tabelas na ordem correta (respeitando onDelete: Restrict) e cria atores limpos para o teste E2E
-    await prisma.ledgerEntry.deleteMany({});
-    await prisma.paymentSplit.deleteMany({});
-    await prisma.order.deleteMany({});
-    await prisma.wallet.deleteMany({});
-    await prisma.user.deleteMany({});
+    // Limpa tabelas via TRUNCATE (pois DELETE em ledger_entries é bloqueado pelo trigger append-only)
+    await prisma.$executeRawUnsafe(
+      'TRUNCATE TABLE "ledger_entries", "payment_splits", "orders", "wallets", "users" RESTART IDENTITY CASCADE;'
+    );
 
     // Cria Plataforma, 2 Vendedores e 1 Cliente via API POST /api/users
     const platformRes = await request(app).post('/api/users').send({

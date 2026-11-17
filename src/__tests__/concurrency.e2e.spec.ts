@@ -219,6 +219,57 @@ describe('Tarefa 8: Suíte E2E de Concorrência, Idempotência Estrita, Trigger 
     expect(res.body.code).toBe('IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_PAYLOAD');
   });
 
+  it('4b. Dois clientes CUSTOMER diferentes usando a MESMA Idempotency-Key -> ambos 201, cada um com seu pedido, saldos corretos', async () => {
+    const secondCustomerRes = await request(app).post('/api/users').send({
+      name: 'Segundo Cliente Concorrência',
+      email: 'segundo.cliente@email.com',
+      document: '987.654.321-00',
+      role: UserRole.CUSTOMER,
+    });
+    expect(secondCustomerRes.status).toBe(201);
+    const secondCustomerId = secondCustomerRes.body.id;
+
+    const [beforePlatform, beforeSellerA, beforeSellerB] = await Promise.all([
+      prisma.wallet.findUniqueOrThrow({ where: { id: platformWalletId } }),
+      prisma.wallet.findUniqueOrThrow({ where: { id: sellerAWalletId } }),
+      prisma.wallet.findUniqueOrThrow({ where: { id: sellerBWalletId } }),
+    ]);
+
+    const sharedKeyAcrossCustomers = 'shared-key-between-two-customers-001';
+    const payloadCustomer1 = buildValidPayload(10000);
+    const payloadCustomer2 = {
+      ...buildValidPayload(10000),
+      customerId: secondCustomerId,
+    };
+
+    const [resCustomer1, resCustomer2] = await Promise.all([
+      request(app)
+        .post('/api/orders/checkout')
+        .set('Idempotency-Key', sharedKeyAcrossCustomers)
+        .send(payloadCustomer1),
+      request(app)
+        .post('/api/orders/checkout')
+        .set('Idempotency-Key', sharedKeyAcrossCustomers)
+        .send(payloadCustomer2),
+    ]);
+
+    expect(resCustomer1.status).toBe(201);
+    expect(resCustomer2.status).toBe(201);
+    expect(resCustomer1.body.idempotentReplayed).toBe(false);
+    expect(resCustomer2.body.idempotentReplayed).toBe(false);
+    expect(resCustomer1.body.order.id).not.toBe(resCustomer2.body.order.id);
+
+    const [afterPlatform, afterSellerA, afterSellerB] = await Promise.all([
+      prisma.wallet.findUniqueOrThrow({ where: { id: platformWalletId } }),
+      prisma.wallet.findUniqueOrThrow({ where: { id: sellerAWalletId } }),
+      prisma.wallet.findUniqueOrThrow({ where: { id: sellerBWalletId } }),
+    ]);
+
+    expect(afterPlatform.balanceCents).toBe(beforePlatform.balanceCents + 3000);
+    expect(afterSellerA.balanceCents).toBe(beforeSellerA.balanceCents + 10000);
+    expect(afterSellerB.balanceCents).toBe(beforeSellerB.balanceCents + 7000);
+  });
+
   it('5. Invariante Contábil Global: soma de todas as wallets === soma de totalAmountCents dos pedidos PAID (excluindo REFUNDED)', async () => {
     const [wallets, paidOrders] = await Promise.all([
       prisma.wallet.findMany(),

@@ -294,7 +294,7 @@ describe('Etapa 3: Orders & Split Checkout Module', () => {
             referenceType: LedgerReferenceType.ORDER_SPLIT,
             amountCents: 1500,
             balanceAfterCents: 1500,
-            idempotencyKey: `idem-new-checkout:split:${platformId}:PLATFORM_FEE`,
+            idempotencyKey: `${customerId}:idem-new-checkout:split:${platformId}:PLATFORM_FEE`,
           }),
         })
       );

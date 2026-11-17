@@ -1,6 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
+import { env } from './config/env';
 import { routes } from './routes';
 import { errorHandler } from './middlewares/errorHandler';
 
@@ -11,10 +12,24 @@ import { errorHandler } from './middlewares/errorHandler';
 
 const app = express();
 
+const allowedOrigins = (env.CORS_ORIGIN ?? '')
+  .split(',')
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+
 app.use(helmet());
 app.use(
   cors({
-    origin: '*',
+    origin:
+      env.NODE_ENV === 'production'
+        ? (origin, callback) => {
+            if (!origin || allowedOrigins.includes(origin)) {
+              callback(null, true);
+              return;
+            }
+            callback(null, false);
+          }
+        : '*',
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization', 'Idempotency-Key'],
     exposedHeaders: ['X-Idempotent-Replayed'],

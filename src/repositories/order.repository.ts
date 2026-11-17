@@ -197,7 +197,7 @@ export class OrderRepository {
             referenceType: LedgerReferenceType.ORDER_SPLIT,
             amountCents: splitItem.amountCents,
             balanceAfterCents: updatedWallet.balanceCents,
-            idempotencyKey: `${idempotencyKey}:split:${paymentSplit.id}`,
+            idempotencyKey: `${idempotencyKey}:split:${splitItem.recipientId}:${splitItem.splitType}`,
             description:
               input.description ??
               `Crédito de split (${splitItem.splitType}) referente ao pedido ${createdOrder.id}`,

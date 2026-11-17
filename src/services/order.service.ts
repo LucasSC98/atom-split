@@ -1,5 +1,5 @@
 import crypto from 'crypto';
-import { OrderStatus, Prisma } from '@prisma/client';
+import { OrderStatus, Prisma, SplitType, UserRole } from '@prisma/client';
 import { AppError } from '../errors/AppError';
 import { OrderRepository, OrderWithDetails } from '../repositories/order.repository';
 import { CreateCheckoutInput } from '../schemas/order.schema';
@@ -88,8 +88,30 @@ export class OrderService {
       );
     }
 
-    // 3. Validação de Atores: customerId deve existir e todos os recipientId devem existir e possuir Wallet
+    // 3. Validação de Regras de Negócio dos Splits e Atores (antes da transação)
     const recipientIds = input.splits.map((s) => s.recipientId);
+    const uniqueRecipientIds = new Set(recipientIds);
+
+    if (uniqueRecipientIds.size !== recipientIds.length) {
+      throw new AppError(
+        'Não é permitido informar o mesmo recebedor (recipientId) mais de uma vez no mesmo checkout.',
+        422,
+        'DUPLICATE_SPLIT_RECIPIENT'
+      );
+    }
+
+    const platformFeeSplits = input.splits.filter(
+      (s) => s.splitType === SplitType.PLATFORM_FEE
+    );
+
+    if (platformFeeSplits.length !== 1) {
+      throw new AppError(
+        `O pedido deve conter exatamente 1 split do tipo PLATFORM_FEE (encontrados: ${platformFeeSplits.length}).`,
+        422,
+        'INVALID_PLATFORM_FEE_SPLIT'
+      );
+    }
+
     const { customer, recipients } =
       await this.orderRepository.findActorsForCheckout(
         input.customerId,
@@ -101,6 +123,14 @@ export class OrderService {
         `Comprador (customerId: ${input.customerId}) não encontrado.`,
         404,
         'CUSTOMER_NOT_FOUND'
+      );
+    }
+
+    if (customer.role !== UserRole.CUSTOMER) {
+      throw new AppError(
+        `O usuário informado como comprador deve possuir a role CUSTOMER (role atual: ${customer.role}).`,
+        422,
+        'INVALID_CUSTOMER_ROLE'
       );
     }
 
@@ -122,6 +152,28 @@ export class OrderService {
           `O recebedor "${recipient.name}" (${recipient.id}) não possui uma Wallet associada para receber splits.`,
           422,
           'RECIPIENT_WALLET_MISSING'
+        );
+      }
+
+      if (
+        splitItem.splitType === SplitType.PLATFORM_FEE &&
+        recipient.role !== UserRole.PLATFORM
+      ) {
+        throw new AppError(
+          `O recebedor do split PLATFORM_FEE deve possuir a role PLATFORM (recebedor "${recipient.name}" possui role ${recipient.role}).`,
+          422,
+          'INVALID_PLATFORM_RECIPIENT_ROLE'
+        );
+      }
+
+      if (
+        splitItem.splitType === SplitType.SELLER_SHARE &&
+        recipient.role !== UserRole.SELLER
+      ) {
+        throw new AppError(
+          `O recebedor do split SELLER_SHARE deve possuir a role SELLER (recebedor "${recipient.name}" possui role ${recipient.role}).`,
+          422,
+          'INVALID_SELLER_RECIPIENT_ROLE'
         );
       }
     }

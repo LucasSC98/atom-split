@@ -27,7 +27,11 @@ export const splitItemSchema = z.object({
       invalid_type_error: 'O campo amountCents deve ser um número inteiro em centavos.',
     })
     .int('O campo amountCents deve ser um número inteiro (centavos).')
-    .positive('O campo amountCents deve ser maior que zero.'),
+    .positive('O campo amountCents deve ser maior que zero.')
+    .max(
+      2_000_000_000,
+      'O campo amountCents excede o limite máximo seguro de inteiro de 32 bits (2.000.000.000 centavos).'
+    ),
   feeBps: z
     .number({
       invalid_type_error: 'O campo feeBps deve ser um número inteiro (basis points).',
@@ -48,7 +52,11 @@ export const createCheckoutSchema = z.object({
       invalid_type_error: 'O campo totalAmountCents deve ser um número inteiro em centavos.',
     })
     .int('O campo totalAmountCents deve ser um número inteiro (centavos).')
-    .positive('O campo totalAmountCents deve ser maior que zero.'),
+    .positive('O campo totalAmountCents deve ser maior que zero.')
+    .max(
+      2_000_000_000,
+      'O campo totalAmountCents excede o limite máximo seguro de inteiro de 32 bits (2.000.000.000 centavos).'
+    ),
   description: z
     .string()
     .trim()

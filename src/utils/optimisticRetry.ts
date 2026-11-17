@@ -53,7 +53,7 @@ export async function withOptimisticRetry<T>(
   options: OptimisticRetryOptions = {}
 ): Promise<T> {
   const maxAttempts = options.maxAttempts ?? 3;
-  const baseDelayMs = options.baseDelayMs ?? 20;
+  const baseDelayMs = options.baseDelayMs ?? 45;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {

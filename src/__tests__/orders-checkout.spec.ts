@@ -8,6 +8,7 @@ import {
 } from '@prisma/client';
 import { app } from '../app';
 import { prisma } from '../config/database';
+import { computeCheckoutRequestHash } from '../services/order.service';
 
 jest.mock('../config/database', () => ({
   prisma: {
@@ -101,11 +102,24 @@ describe('Etapa 3: Orders & Split Checkout Module', () => {
       expect(response.body.code).toBe('INVALID_SPLIT_SUM');
     });
 
-    it('deve retornar HTTP 200 com X-Idempotent-Replayed: true se a Idempotency-Key já foi processada', async () => {
+    it('deve retornar HTTP 200 com X-Idempotent-Replayed: true se a Idempotency-Key já foi processada com o mesmo payload', async () => {
+      const payload = {
+        customerId,
+        totalAmountCents: 10000,
+        splits: [
+          {
+            recipientId: sellerAId,
+            splitType: SplitType.SELLER_SHARE,
+            amountCents: 10000,
+          },
+        ],
+      };
+
       const existingOrder = {
         id: '11111111-2222-3333-4444-555555555555',
         customerId,
         idempotencyKey: 'idem-already-processed',
+        requestHash: computeCheckoutRequestHash(payload),
         totalAmountCents: 10000,
         currency: 'BRL',
         status: OrderStatus.PAID,
@@ -118,6 +132,33 @@ describe('Etapa 3: Orders & Split Checkout Module', () => {
       const response = await request(app)
         .post('/api/orders/checkout')
         .set('Idempotency-Key', 'idem-already-processed')
+        .send(payload);
+
+      expect(response.status).toBe(200);
+      expect(response.headers['x-idempotent-replayed']).toBe('true');
+      expect(response.body.idempotentReplayed).toBe(true);
+      expect(response.body.order.id).toBe(existingOrder.id);
+      expect(mockedPrisma.$transaction).not.toHaveBeenCalled();
+    });
+
+    it('deve retornar HTTP 422 IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_PAYLOAD se a mesma chave for reusada com payload diferente', async () => {
+      const existingOrder = {
+        id: '11111111-2222-3333-4444-555555555555',
+        customerId,
+        idempotencyKey: 'idem-reused-diff-payload',
+        requestHash: 'hash-diferente-do-payload-atual',
+        totalAmountCents: 10000,
+        currency: 'BRL',
+        status: OrderStatus.PAID,
+        paymentSplits: [],
+        ledgerEntries: [],
+      };
+
+      (mockedPrisma.order.findUnique as jest.Mock).mockResolvedValue(existingOrder);
+
+      const response = await request(app)
+        .post('/api/orders/checkout')
+        .set('Idempotency-Key', 'idem-reused-diff-payload')
         .send({
           customerId,
           totalAmountCents: 10000,
@@ -130,11 +171,8 @@ describe('Etapa 3: Orders & Split Checkout Module', () => {
           ],
         });
 
-      expect(response.status).toBe(200);
-      expect(response.headers['x-idempotent-replayed']).toBe('true');
-      expect(response.body.idempotentReplayed).toBe(true);
-      expect(response.body.order.id).toBe(existingOrder.id);
-      expect(mockedPrisma.$transaction).not.toHaveBeenCalled();
+      expect(response.status).toBe(422);
+      expect(response.body.code).toBe('IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_PAYLOAD');
     });
 
     it('deve processar o checkout atomicamente criando Order, PaymentSplits, atualizando Wallets com version e gravando LedgerEntries', async () => {

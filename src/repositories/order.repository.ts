@@ -12,6 +12,7 @@ export const orderDetailsSelect = {
   id: true,
   customerId: true,
   idempotencyKey: true,
+  requestHash: true,
   totalAmountCents: true,
   currency: true,
   status: true,
@@ -71,9 +72,17 @@ export type OrderWithDetails = Prisma.OrderGetPayload<{
 }>;
 
 export class OrderRepository {
-  async findByIdempotencyKey(idempotencyKey: string): Promise<OrderWithDetails | null> {
+  async findByIdempotencyKey(
+    customerId: string,
+    idempotencyKey: string
+  ): Promise<OrderWithDetails | null> {
     return prisma.order.findUnique({
-      where: { idempotencyKey },
+      where: {
+        customerId_idempotencyKey: {
+          customerId,
+          idempotencyKey,
+        },
+      },
       select: orderDetailsSelect,
     });
   }
@@ -122,14 +131,16 @@ export class OrderRepository {
 
   async executeCheckoutTransaction(
     idempotencyKey: string,
+    requestHash: string,
     input: CreateCheckoutInput
   ): Promise<OrderWithDetails> {
     return prisma.$transaction(async (tx) => {
-      // a) Cria a Order com status PAID e a idempotencyKey
+      // a) Cria a Order com status PAID, idempotencyKey e requestHash
       const createdOrder = await tx.order.create({
         data: {
           customerId: input.customerId,
           idempotencyKey,
+          requestHash,
           totalAmountCents: input.totalAmountCents,
           currency: 'BRL',
           status: OrderStatus.PAID,

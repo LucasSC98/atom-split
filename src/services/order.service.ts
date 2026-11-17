@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import { OrderStatus, Prisma } from '@prisma/client';
 import { AppError } from '../errors/AppError';
 import { OrderRepository, OrderWithDetails } from '../repositories/order.repository';
@@ -13,6 +14,34 @@ export interface RefundResult {
   idempotentReplayed: boolean;
 }
 
+/**
+ * Gera o hash SHA-256 do JSON canônico de customerId, totalAmountCents e splits
+ * ordenados por recipientId e splitType para validação estrita de idempotência.
+ */
+export function computeCheckoutRequestHash(input: CreateCheckoutInput): string {
+  const canonicalPayload = {
+    customerId: input.customerId,
+    totalAmountCents: input.totalAmountCents,
+    splits: [...input.splits]
+      .map((s) => ({
+        recipientId: s.recipientId,
+        splitType: s.splitType,
+        amountCents: s.amountCents,
+        feeBps: s.feeBps ?? null,
+      }))
+      .sort((a, b) => {
+        const byRecipient = a.recipientId.localeCompare(b.recipientId);
+        if (byRecipient !== 0) return byRecipient;
+        return a.splitType.localeCompare(b.splitType);
+      }),
+  };
+
+  return crypto
+    .createHash('sha256')
+    .update(JSON.stringify(canonicalPayload))
+    .digest('hex');
+}
+
 export class OrderService {
   constructor(private readonly orderRepository = new OrderRepository()) {}
 
@@ -20,11 +49,23 @@ export class OrderService {
     idempotencyKey: string,
     input: CreateCheckoutInput
   ): Promise<CheckoutResult> {
-    // 1. Idempotência Segura: verifica se já existe uma Order com a mesma idempotencyKey
-    const existingOrder =
-      await this.orderRepository.findByIdempotencyKey(idempotencyKey);
+    const requestHash = computeCheckoutRequestHash(input);
+
+    // 1. Idempotência Segura escopada por cliente + validação de hash do payload
+    const existingOrder = await this.orderRepository.findByIdempotencyKey(
+      input.customerId,
+      idempotencyKey
+    );
 
     if (existingOrder) {
+      if (existingOrder.requestHash !== requestHash) {
+        throw new AppError(
+          'A chave de idempotência informada já foi utilizada para este cliente com parâmetros de pagamento diferentes.',
+          422,
+          'IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_PAYLOAD'
+        );
+      }
+
       return {
         order: existingOrder,
         idempotentReplayed: true,
@@ -88,6 +129,7 @@ export class OrderService {
     try {
       const order = await this.orderRepository.executeCheckoutTransaction(
         idempotencyKey,
+        requestHash,
         input
       );
 
@@ -101,9 +143,19 @@ export class OrderService {
         error instanceof Prisma.PrismaClientKnownRequestError &&
         error.code === 'P2002'
       ) {
-        const concurrentOrder =
-          await this.orderRepository.findByIdempotencyKey(idempotencyKey);
+        const concurrentOrder = await this.orderRepository.findByIdempotencyKey(
+          input.customerId,
+          idempotencyKey
+        );
         if (concurrentOrder) {
+          if (concurrentOrder.requestHash !== requestHash) {
+            throw new AppError(
+              'A chave de idempotência informada já foi utilizada para este cliente com parâmetros de pagamento diferentes.',
+              422,
+              'IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_PAYLOAD'
+            );
+          }
+
           return {
             order: concurrentOrder,
             idempotentReplayed: true,

@@ -212,10 +212,14 @@ export class OrderService {
         idempotentReplayed: false,
       };
     } catch (error) {
-      // Se outra requisição paralela já estornou o mesmo pedido (violação de unique key na idempotencyKey do refund):
+      // Ao capturar P2002, P2025 ou erro de estado/saldo causado por um refund concorrente que
+      // acabou de comitar, relê o pedido: se já estiver REFUNDED, retorna replay idempotente (200).
       if (
-        error instanceof Prisma.PrismaClientKnownRequestError &&
-        error.code === 'P2002'
+        (error instanceof Prisma.PrismaClientKnownRequestError &&
+          (error.code === 'P2002' || error.code === 'P2025')) ||
+        (error instanceof AppError &&
+          (error.code === 'INVALID_ORDER_STATUS_FOR_REFUND' ||
+            error.code === 'INSUFFICIENT_WALLET_BALANCE_FOR_REFUND'))
       ) {
         const currentOrder = await this.orderRepository.findById(orderId);
         if (currentOrder && currentOrder.status === OrderStatus.REFUNDED) {
@@ -224,17 +228,29 @@ export class OrderService {
             idempotentReplayed: true,
           };
         }
-      }
 
-      if (
-        error instanceof Prisma.PrismaClientKnownRequestError &&
-        error.code === 'P2025'
-      ) {
-        throw new AppError(
-          'Conflito de concorrência ao processar estorno na carteira (Optimistic Locking). Tente novamente.',
-          409,
-          'WALLET_CONCURRENCY_CONFLICT'
-        );
+        if (
+          error instanceof Prisma.PrismaClientKnownRequestError &&
+          error.code === 'P2025'
+        ) {
+          const target = error.meta?.p2025Target ?? error.meta?.modelName;
+          if (target === 'order' || target === 'Order') {
+            throw new AppError(
+              'Conflito de concorrência ao atualizar o status do pedido durante o estorno.',
+              409,
+              'ORDER_STATUS_CONCURRENCY_CONFLICT'
+            );
+          }
+
+          // Só lança 409 WALLET_CONCURRENCY_CONFLICT se o pedido continuar PAID
+          if (!currentOrder || currentOrder.status === OrderStatus.PAID) {
+            throw new AppError(
+              'Conflito de concorrência ao processar estorno na carteira (Optimistic Locking). Tente novamente.',
+              409,
+              'WALLET_CONCURRENCY_CONFLICT'
+            );
+          }
+        }
       }
 
       throw error;

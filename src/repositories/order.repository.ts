@@ -268,16 +268,27 @@ export class OrderRepository {
         }
 
         // Atualiza a Wallet decrementando amountCents e incrementando version (Optimistic Locking)
-        const updatedWallet = await tx.wallet.update({
-          where: {
-            id: currentWallet.id,
-            version: currentWallet.version,
-          },
-          data: {
-            balanceCents: { decrement: split.amountCents },
-            version: { increment: 1 },
-          },
-        });
+        let updatedWallet;
+        try {
+          updatedWallet = await tx.wallet.update({
+            where: {
+              id: currentWallet.id,
+              version: currentWallet.version,
+            },
+            data: {
+              balanceCents: { decrement: split.amountCents },
+              version: { increment: 1 },
+            },
+          });
+        } catch (err) {
+          if (
+            err instanceof Prisma.PrismaClientKnownRequestError &&
+            err.code === 'P2025'
+          ) {
+            err.meta = { ...err.meta, p2025Target: 'wallet' };
+          }
+          throw err;
+        }
 
         // Cria novo registro imutável DEBIT no LedgerEntry sem tocar nos registros anteriores
         await tx.ledgerEntry.create({
@@ -302,15 +313,25 @@ export class OrderRepository {
       }
 
       // Atualiza o status da Order para REFUNDED garantindo que ainda estava PAID
-      await tx.order.update({
-        where: {
-          id: order.id,
-          status: OrderStatus.PAID,
-        },
-        data: {
-          status: OrderStatus.REFUNDED,
-        },
-      });
+      try {
+        await tx.order.update({
+          where: {
+            id: order.id,
+            status: OrderStatus.PAID,
+          },
+          data: {
+            status: OrderStatus.REFUNDED,
+          },
+        });
+      } catch (err) {
+        if (
+          err instanceof Prisma.PrismaClientKnownRequestError &&
+          err.code === 'P2025'
+        ) {
+          err.meta = { ...err.meta, p2025Target: 'order' };
+        }
+        throw err;
+      }
 
       const refundedOrder = await tx.order.findUniqueOrThrow({
         where: { id: order.id },

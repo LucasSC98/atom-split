@@ -4,6 +4,7 @@ import helmet from 'helmet';
 import { env } from './config/env';
 import { routes } from './routes';
 import { errorHandler } from './middlewares/errorHandler';
+import { generalRateLimiter } from './middlewares/rateLimiter';
 
 // Garante serialização JSON segura para campos BigInt (ex: LedgerEntry.seq)
 (BigInt.prototype as unknown as { toJSON: () => number }).toJSON = function () {
@@ -11,6 +12,9 @@ import { errorHandler } from './middlewares/errorHandler';
 };
 
 const app = express();
+
+// Necessário para identificar corretamente o IP real do cliente atrás do proxy reverso do Render
+app.set('trust proxy', 1);
 
 const allowedOrigins = (env.CORS_ORIGIN ?? '')
   .split(',')
@@ -37,11 +41,7 @@ app.use(
 );
 app.use(express.json());
 
-// Registra rotas em /api (ex: POST /api/users, GET /api/orders, GET /api/wallets/:walletId/statement)
-// e mantém compatibilidade em /api/v1
-app.use('/api', routes);
-app.use('/api/v1', routes);
-
+// /health fica fora do rate limit
 app.get('/health', (_req, res) => {
   res.status(200).json({
     status: 'ok',
@@ -49,6 +49,10 @@ app.get('/health', (_req, res) => {
     timestamp: new Date().toISOString(),
   });
 });
+
+// Registra rotas em /api e mantém compatibilidade em /api/v1 com rate limiter geral (120 req/min)
+app.use('/api', generalRateLimiter, routes);
+app.use('/api/v1', generalRateLimiter, routes);
 
 app.use(errorHandler);
 

@@ -23,6 +23,7 @@ import {
   Wallet,
 } from 'lucide-react';
 import {
+  API_BASE_URL,
   fetchOrders,
   fetchUsers,
   fetchWalletStatement,
@@ -134,6 +135,16 @@ export default function App() {
         }
       } catch (err) {
         console.error('Erro ao atualizar dados do console:', err);
+        if (err instanceof Error && err.message.includes('Muitas requisições')) {
+          setTelemetry({
+            type: 'error',
+            title: 'Limite de Requisições Atingido (HTTP 429)',
+            httpStatus: 429,
+            code: 'RATE_LIMITED',
+            message: 'Muitas requisições, aguarde um instante antes de tentar novamente.',
+            timestamp: new Date().toLocaleTimeString('pt-BR'),
+          });
+        }
       } finally {
         setLoadingInitial(false);
       }
@@ -450,7 +461,7 @@ export default function App() {
           <div className="flex items-center gap-3">
             <div className="hidden sm:flex items-center gap-2 px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-800 text-xs font-mono text-slate-300">
               <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
-              API: http://localhost:3000/api
+              API: {API_BASE_URL}
             </div>
             <button
               onClick={() => refreshAllData()}

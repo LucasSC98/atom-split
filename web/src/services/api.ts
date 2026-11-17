@@ -5,7 +5,7 @@ import {
   WalletStatementResponse,
 } from '../types/api';
 
-const API_BASE_URL =
+export const API_BASE_URL =
   import.meta.env.VITE_API_URL || 'http://localhost:3000/api';
 
 export interface ApiActionResult<T> {
@@ -22,6 +22,9 @@ export interface ApiActionResult<T> {
 
 export async function fetchUsers(): Promise<UserWithWallet[]> {
   const res = await fetch(`${API_BASE_URL}/users`);
+  if (res.status === 429) {
+    throw new Error('Muitas requisições, aguarde um instante.');
+  }
   if (!res.ok) {
     throw new Error('Falha ao carregar usuários e carteiras.');
   }
@@ -30,6 +33,9 @@ export async function fetchUsers(): Promise<UserWithWallet[]> {
 
 export async function fetchOrders(): Promise<OrderDetails[]> {
   const res = await fetch(`${API_BASE_URL}/orders`);
+  if (res.status === 429) {
+    throw new Error('Muitas requisições, aguarde um instante.');
+  }
   if (!res.ok) {
     throw new Error('Falha ao carregar histórico de pedidos.');
   }
@@ -44,6 +50,9 @@ export async function fetchWalletStatement(
   const res = await fetch(
     `${API_BASE_URL}/wallets/${walletId}/statement?page=${page}&limit=${limit}`
   );
+  if (res.status === 429) {
+    throw new Error('Muitas requisições, aguarde um instante.');
+  }
   if (!res.ok) {
     throw new Error('Falha ao carregar extrato da carteira (Ledger).');
   }
@@ -66,7 +75,20 @@ export async function postCheckout(
   });
 
   const idempotentHeader = res.headers.get('X-Idempotent-Replayed');
-  const json = await res.json();
+  const json = await res.json().catch(() => ({}));
+
+  if (res.status === 429) {
+    return {
+      ok: false,
+      status: 429,
+      idempotentReplayedHeader: idempotentHeader,
+      error: {
+        code: json.code || 'RATE_LIMITED',
+        message:
+          'Muitas requisições, aguarde um instante antes de tentar novamente.',
+      },
+    };
+  }
 
   if (!res.ok) {
     return {
@@ -102,7 +124,20 @@ export async function postRefundOrder(
   });
 
   const idempotentHeader = res.headers.get('X-Idempotent-Replayed');
-  const json = await res.json();
+  const json = await res.json().catch(() => ({}));
+
+  if (res.status === 429) {
+    return {
+      ok: false,
+      status: 429,
+      idempotentReplayedHeader: idempotentHeader,
+      error: {
+        code: json.code || 'RATE_LIMITED',
+        message:
+          'Muitas requisições, aguarde um instante antes de tentar novamente.',
+      },
+    };
+  }
 
   if (!res.ok) {
     return {
@@ -123,4 +158,3 @@ export async function postRefundOrder(
     data: json,
   };
 }
-

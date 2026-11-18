@@ -1,74 +1,52 @@
-# AtomicSplit — Motor de Split de Pagamentos & Livro-Razão Imutável
+AtomicSplit — Marketplace Payment Split & Immutable Ledger EngineMotor de liquidação financeira, divisão de pagamentos (Split Payment) e livro-razão contábil imutável (Ledger) projetado para marketplaces. O sistema garante conformidade transacional ACID, validação matemática de soma zero em centavos, controle de concorrência otimista em carteiras e idempotência estrita em operações de pagamento e estorno.Ambientes em ProduçãoConsole de Simulação e Auditoria (Frontend): https://split.lucascustodio.me (Mirror: https://atom-split-frontend.onrender.com)API RESTful (Backend): https://atom-split.onrender.com/apiHealthcheck: https://atom-split.onrender.com/healthVisão Geral da Arquitetura e Garantias FinanceirasSistemas de pagamentos em marketplaces exigem que um único pagamento realizado por um comprador (CUSTOMER) seja particionado de forma atômica entre a taxa da plataforma (PLATFORM_FEE) e múltiplos vendedores (SELLER_SHARE), sem risco de perda de precisão decimal, condições de corrida (race conditions) ou cobranças duplicadas.O AtomicSplit resolve esses problemas através de cinco pilares de engenharia:Aritmética Estrita em Centavos e Basis Points (Int):
+Nenhum valor monetário utiliza ponto flutuante (Float ou Double), eliminando erros de representação binária (IEEE 754). Todos os valores são processados e persistidos como inteiros representando centavos de Real (10000 = R$ 100,00) e taxas percentuais são expressas em basis points (1500 bps = 15.00%).Invariante de Soma Zero (Zero-Sum Validation):
+Antes de abrir uma transação de banco de dados no checkout, o motor valida matematicamente se o somatório de todos os itens de splits corresponde exatamente ao totalAmountCents do pedido:$$\sum_{i=1}^{n} \text{split}_i = \text{totalAmountCents}$$Qualquer divergência de $1$ centavo para mais ou para menos aborta a requisição imediatamente com HTTP 422 Unprocessable Entity.Transações Atômicas ACID e Controle de Concorrência Otimista (OCC):
+A criação do pedido, o registro das divisões (PaymentSplit), a atualização de saldo das carteiras (Wallet) e a gravação no livro-razão (LedgerEntry) ocorrem dentro de uma única transação interativa (prisma.$transaction). Cada carteira possui uma coluna version incrementada a cada mutação (version = version + 1), verificando a versão lida na cláusula WHERE para impedir lost updates em cenários de alta simultaneidade.Idempotência Determinística (Checkout e Estorno):
+Mutacões financeiras exigem o envio do cabeçalho Idempotency-Key. Caso o cliente ou gateway reenvie uma requisição já processada (por timeout de rede ou duplo clique), a API intercepta a chave, evita o reprocessamento e retorna o estado consolidado com o cabeçalho X-Idempotent-Replayed: true. No nível do banco de dados, cada lançamento contábil possui sua própria chave determinística composta ({orderIdempotencyKey}:split:{splitId} e {orderIdempotencyKey}:refund:{splitId}).Livro-Razão Contábil Imutável (Append-Only Ledger):
+A tabela LedgerEntry opera exclusivamente em modo append-only. Nenhum registro contábil é atualizado (UPDATE) ou removido (DELETE). Operações de estorno (POST /api/orders/:orderId/refund) verificam a suficiência de saldo das carteiras envolvidas e geram lançamentos compensatórios inversos (type: DEBIT, referenceType: ORDER_REFUND), preservando a trilha de auditoria completa e o histórico de saldo (balanceAfterCents).Stack TecnológicaBackendRuntime & Linguagem: Node.js, TypeScriptFramework Web: Express.js (com Helmet, CORS restrito e Rate Limiting)ORM & Banco de Dados: Prisma ORM, PostgreSQL (Serverless via Neon em AWS sa-east-1 com suporte a PgBouncer Connection Pooling)Validação de Esquemas: ZodTestes Automatizados: Jest e Supertest (Suítes Unitárias e de Integração E2E)Frontend (AtomicSplit Console)Framework: React 18, TypeScript, ViteEstilização: TailwindCSS, Lucide IconsModelo de DadosO esquema relacional foi estruturado em torno de quatro entidades principais:User: Representa os participantes do ecossistema (PLATFORM, SELLER, CUSTOMER) com validação de documento (CPF/CNPJ) e e-mail únicos.Wallet: Carteira virtual associada exclusivamente a recebedores (PLATFORM e SELLER). Armazena balanceCents, currency (BRL) e o contador version para bloqueio otimista.Order & PaymentSplit: Registra a intenção de compra (PAID ou REFUNDED), a idempotencyKey da transação e a lista de partições financeiras destinadas a cada recebedor.LedgerEntry: Registro imutável de movimentação financeira contendo seq (sequencial BigInt), type (CREDIT | DEBIT), referenceType (ORDER_SPLIT | ORDER_REFUND), amountCents, balanceAfterCents e idempotencyKey.Especificação da API (Endpoints)1. Participantes e CarteirasGET /api/usersLista os participantes cadastrados e o estado atual de suas respectivas carteiras (parâmetro de consulta opcional: ?role=PLATFORM|SELLER|CUSTOMER).POST /api/usersCadastra um novo participante. Quando o role é SELLER ou PLATFORM, a carteira correspondente (Wallet) é inicializada atomicamente com saldo zero e version: 1.GET /api/wallets/:walletId/statementRetorna o saldo atual da carteira, sua versão otimista e o extrato paginado de lançamentos do livro-razão (ledgerEntries) ordenado de forma decrescente.2. Pedidos, Split Checkout e Estorno ContábilPOST /api/orders/checkoutProcessa um pagamento com divisão atômica entre múltiplos recebedores.Headers Obrigatórios:Idempotency-Key: Identificador único da operação (ex: UUID v4).Exemplo de Payload:{
+  "customerId": "8334cd37-7f11-4493-83db-860894d20162",
+  "totalAmountCents": 10000,
+  "description": "Pedido Marketplace #001",
+  "splits": [
+    {
+      "recipientId": "b014fb31-e907-4406-9fff-b22377b431a9",
+      "splitType": "PLATFORM_FEE",
+      "amountCents": 1500,
+      "feeBps": 1500
+    },
+    {
+      "recipientId": "9d3e684c-fd7a-46a1-af25-19a89b3adcba",
+      "splitType": "SELLER_SHARE",
+      "amountCents": 5000
+    },
+    {
+      "recipientId": "67262ae1-a5a9-4ff6-a6c7-c38f98c23722",
+      "splitType": "SELLER_SHARE",
+      "amountCents": 3500
+    }
+  ]
+}
+Respostas:201 Created: Checkout processado com sucesso.200 OK: Retorno idempotente de requisição já processada (X-Idempotent-Replayed: true).400 Bad Request: Ausência de Idempotency-Key ou erro de validação estrutural (Zod).422 Unprocessable Entity: Violação da regra Zero-Sum (soma dos splits diferente de totalAmountCents) ou recebedor sem carteira ativa.POST /api/orders/:orderId/refundExecuta a reversão contábil completa de um pedido pago.Comportamento:Verifica se o pedido encontra-se com status PAID (se já estiver REFUNDED, retorna 200 OK com X-Idempotent-Replayed: true).Valida se todas as carteiras que receberam valores no split possuem saldo disponível suficiente para o débito.Debita o valor exato de cada carteira incrementando sua version, insere os registros DEBIT (ORDER_REFUND) no LedgerEntry e atualiza o status do pedido para REFUNDED.GET /api/orders e GET /api/orders/:orderIdConsulta o histórico de pedidos processados com seus respectivos paymentSplits e ledgerEntries.Execução Local e DesenvolvimentoPré-requisitosNode.js 20+PostgreSQL 15+ (local via Docker ou instância remota no Neon)1. Instalação de Dependênciasgit clone https://github.com/LucasSC98/atom-split.git
+cd atom-split
 
-API RESTful e Console Financeiro de **Split de Pagamentos para Marketplaces** com foco em integridade contábil ACID, valores monetários estritamente em centavos (`Int`), Livro-Razão Imutável (*Append-Only Ledger*), Idempotência com verificação de hash de payload (`SHA-256`) e Controle de Concorrência Otimista (`version` + retry exponencial com jitter).
-
----
-
-## 🚀 Deploy & Demo Online
-
-- **🔗 Link da Demo (Painel Web)**: `[INSERIR_URL_DA_DEMO_AQUI]`
-- **🔗 Endpoint da API (Healthcheck)**: `[INSERIR_URL_DA_API_AQUI]/health`
-
-> ⚠️ **Aviso sobre Cold Start (Plano Gratuito do Render)**:
-> A API está hospedada no plano gratuito (*Free Tier*) do **Render**, que hiberna após 15 minutos de inatividade. **No primeiro acesso, a API pode levar cerca de 1 minuto para acordar ("cold start")**. As requisições subsequentes respondem em poucos milissegundos.
-
-### Arquitetura de Deploy
-1. **Banco de Dados — Neon (Serverless PostgreSQL)**:
-   - Provê duas strings de conexão: uma com *connection pooler* PgBouncer (`DATABASE_URL`, usada pela aplicação em runtime) e uma conexão direta (`DIRECT_URL`, usada pelo Prisma Migrate no momento do deploy).
-   - Aplica *constraints* nativas no PostgreSQL (`CHECK (balance_cents >= 0)`, `CHECK (amount_cents > 0)`) e trigger `BEFORE UPDATE OR DELETE ON ledger_entries` para garantir que o livro-razão seja estritamente *append-only*.
-2. **Backend API — Render (Web Service Node.js)**:
-   - **Build Command**: `npm install && npm run build:render` (`prisma generate && tsc`)
-   - **Start Command**: `npm run start:render` (`prisma migrate deploy && node dist/server.js`)
-   - Conta com `trust proxy` habilitado, CORS restrito às origens autorizadas em produção e *Rate Limiting* por IP (`120 req/min` geral e `30 req/min` para `checkout` e `refund`, com `/health` isento).
-3. **Painel Web (`/web`) — Site Estático (Render Static Site / Vercel)**:
-   - **Root Directory**: `web`
-   - **Build Command**: `npm install && npm run build`
-   - **Publish Directory**: `dist`
-
-### Variáveis de Ambiente de Produção
-
-#### Backend (Render Web Service)
-| Variável | Obrigatória | Descrição / Exemplo |
-|---|---|---|
-| `NODE_ENV` | Sim | `production` |
-| `PORT` | Automática (Render) | Porta HTTP injetada pelo Render (default local: `3000`) |
-| `DATABASE_URL` | Sim | Connection string **com pooler** da Neon (`postgresql://user:pass@ep-...-pooler.region.aws.neon.tech/neondb?sslmode=require&pgbouncer=true`) |
-| `DIRECT_URL` | Sim | Connection string **direta (sem pooler)** da Neon para execução de `prisma migrate deploy` (`postgresql://user:pass@ep-....region.aws.neon.tech/neondb?sslmode=require`) |
-| `CORS_ORIGIN` | Sim (em produção) | Lista de origens permitidas separadas por vírgula (ex: `https://atomicsplit-web.onrender.com`) |
-
-#### Frontend (`web/` — Static Site)
-| Variável | Obrigatória | Descrição / Exemplo |
-|---|---|---|
-| `VITE_API_URL` | Sim | URL base da API em produção incluindo `/api` (ex: `https://atomicsplit-api.onrender.com/api`) |
-
----
-
-## 🏛️ Pilares Arquiteturais
-
-1. **Manipulação de Dinheiro em Centavos (`Int`)**: Nenhum valor financeiro usa `Float` ou `Decimal`. Todos os saldos (`balanceCents`), totais (`totalAmountCents`) e divisões (`amountCents`) são inteiros em centavos (`R$ 100,00 = 10000`) validados até o limite seguro de `Int32` (`2_000_000_000`).
-2. **Padrão Ledger Imutável (*Append-Only*)**: `Wallet.balanceCents` nunca sofre `UPDATE` isolado. Toda movimentação financeira ocorre dentro de uma transação ACID (`prisma.$transaction`) acompanhada de um registro imutável `CREDIT` ou `DEBIT` em `ledger_entries`, ordenado deterministicamente por sequência monotônica (`seq BigInt`) e protegido por trigger SQL `BEFORE UPDATE OR DELETE`.
-3. **Idempotência Escopada por Cliente com Hash de Payload**: O checkout exige `Idempotency-Key` com constraint `@@unique([customerId, idempotencyKey])` e valida o `requestHash` (`SHA-256` do JSON canônico). Reenviar a mesma chave com o mesmo payload retorna `HTTP 200` (`X-Idempotent-Replayed: true`); reutilizar a mesma chave com payload diferente retorna `HTTP 422` (`IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_PAYLOAD`).
-4. **Concorrência Otimista (`version`) + Retry Exponencial**: Atualizações de carteira utilizam `updateMany` condicional na versão lida (`version`), lançando `OptimisticLockError` quando `count === 0` e reexecutando a transação via `withOptimisticRetry` (até 8 tentativas com backoff exponencial de 10ms a 200ms + jitter).
-
----
-
-## 💻 Execução Local
-
-```bash
-# 1. Subir PostgreSQL via Docker Compose (cria split_payments e split_payments_test)
-docker compose up -d
-
-# 2. Instalar dependências do Backend e aplicar migrations
+# Instalar dependências do backend e do frontend
 npm install
-npx prisma migrate dev
+npm --prefix web install
+2. Configuração de Variáveis de AmbienteCrie um arquivo .env na raiz do projeto seguindo o modelo abaixo:PORT=3000
+NODE_ENV=development
+CORS_ORIGIN="http://localhost:5173"
 
-# 3. Popular banco de desenvolvimento com os 4 atores iniciais (idempotente)
-npm run db:seed
+# Conexão com Connection Pooler (PgBouncer) para execução da aplicação
+DATABASE_URL="postgresql://user:password@host:5432/split_payments?schema=public"
 
-# 4. Rodar suíte de testes (isola automaticamente no banco split_payments_test)
-npm test
-
-# 5. Iniciar API (http://localhost:3000) e Painel Web (http://localhost:5173)
+# Conexão direta para execução de migrações (Prisma Migrate)
+DIRECT_URL="postgresql://user:password@host:5432/split_payments?schema=public"
+3. Migrações e Seed InicialO script de seed é idempotente (upsert) e provisiona automaticamente a conta da Plataforma, dois Lojistas com suas respectivas carteiras e um Cliente comprador para simulações imediatas:npx prisma migrate deploy
+npx prisma db seed
+4. Inicialização dos Serviços# Terminal 1: Iniciar API Backend (porta 3000)
 npm run dev
+
+# Terminal 2: Iniciar Console Frontend (porta 5173)
 npm run dev:web
-```
+Suíte de Testes AutomatizadosO projeto conta com 15 testes automatizados distribuídos em 3 suítes (users-wallets.spec.ts, orders-checkout.spec.ts e fintech-split-refund.e2e.spec.ts), cobrindo:Criação atômica de usuários e carteiras e higienização de documentos;Validação de soma zero (bloqueio de divergência de 1 centavo com rollback integral);Garantia de idempotência em requisições repetidas de checkout e estorno;Integridade do livro-razão e controle de versão (version) após ciclos completos de pagamento e refund.Para executar a suíte de testes:npm test
+AutorDesenvolvido por Lucas Custódio — https://lucascustodio.me
